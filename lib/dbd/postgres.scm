@@ -90,7 +90,7 @@
 	      :auto-commit auto-commit))))
 
 (define-method dbi-open? ((conn <dbi-postgres-connection>))
-  (and (postgrel-connection conn) #t))
+  (and (postgres-connection conn) #t))
 
 (define-method dbi-close ((conn <dbi-postgres-connection>))
   (let1 con (postgres-connection conn)
@@ -175,7 +175,8 @@
     (dbi-rollback! con)))
 
 (define-method dbi-columns ((query <dbi-postgres-query>))
-  (postgresql-query-descriptions (postgres-query-query query)))
+  (vector-map (lambda (v) (vector-ref v 0))
+	      (postgresql-query-descriptions (postgres-query-query query))))
 
 (define (make-postgres-driver) (make <dbi-postgres-driver>))
 
@@ -186,7 +187,7 @@
 
 ;; TODO 
 (define-method dbi-table-columns ((table <dbi-postgres-table>))
-  (error 'dbi-tables "not supported" conn))
+  (error 'dbi-tables "not supported" table))
 
 
 )
