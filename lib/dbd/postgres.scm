@@ -51,7 +51,8 @@
 (define-class <dbi-postgres-query> (<dbi-query> <state-mixin>)
   ;; temporary storage to keep the result of dbi-execute!
   ((parameters :init-value '() :init-keyword :parameters)
-   (query :init-value #f :reader postgres-query-query)))
+   (query :init-value #f :reader postgres-query-query)
+   (end? :init-value #f)))
 
 ;; TODO
 (define-class <dbi-postgres-table> (<dbi-table>)   ())
@@ -118,13 +119,14 @@
     (make <dbi-postgres-query> 
       :prepared stmt 
       :connection conn
-      :paramters (map-with-index (lambda (i v) (cons (+ i 1) v)) args))))
+      :parameters (map-with-index (lambda (i v) (cons (+ i 1) v)) args))))
 
 (define-method dbi-open? ((q <dbi-postgres-query>))
   (and (~ q 'prepared) #t))
 
 (define-method dbi-close ((q <dbi-postgres-query>))
-  (postgresql-close-prepared-statement! (~ q 'prepared))
+  (when (~ q 'prepared)
+    (postgresql-close-prepared-statement! (~ q 'prepared)))
   (set! (~ q 'prepared) #f))
 
 (define-method dbi-commit! ((conn <dbi-postgres-connection>))
@@ -161,10 +163,14 @@
 	  q))))
 
 (define-method dbi-fetch! ((query <dbi-postgres-query>))
-  (let1 query (~ query 'query)
-    (if query
-	(postgresql-fetch-query! query)
-	(error 'dbi-fetch! "query is not SELECT"))))
+  (if (~ query 'end?)
+      #f
+      (let1 q (~ query 'query)
+	(if q
+	    (let ((r (postgresql-fetch-query! q)))
+	      (unless r (set! (~ query 'end?) #t))
+	      r)
+	    (error 'dbi-fetch! "query is not SELECT")))))
 
 (define-method dbi-commit! ((query <dbi-postgres-query>))
   (let ((con (dbi-query-connection query)))
