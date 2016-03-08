@@ -10,4 +10,4 @@
   :url "https://github.com/ktakashi/sagittarius-dbd-postgres/archive/master.zip")
 
  (install 
-  (files "dbd/postgres.scm")))
+  (files "lib/dbd/postgres.scm")))
