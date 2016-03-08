@@ -156,6 +156,8 @@
     (apply postgresql-bind-parameters! stmt
 	   (map cdr (list-sort (lambda (a b) (< (car a) (car b)))
 			       (~ query 'parameters))))
+    ;; reset end flag
+    (set! (~ query 'end?) #f)
     (let1 q (postgresql-execute! stmt)
       (if (postgresql-query? q)
 	  (begin (set! (~ query 'query) q) -1)
