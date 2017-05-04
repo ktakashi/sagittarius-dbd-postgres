@@ -83,6 +83,8 @@
 					      database username password)))
 	;; open it
 	(postgresql-open-connection! conn)
+	;; make it secure if the server supports it.
+	(postgresql-secure-connection! conn)
 	;; login
 	(postgresql-login! conn)
 	;; manually do those thing...
