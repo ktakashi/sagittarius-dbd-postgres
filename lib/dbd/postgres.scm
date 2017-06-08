@@ -36,6 +36,7 @@
 	    (dbi)
 	    (clos user)
 	    (util list) ;; for map-with-index
+	    (text sql)
 	    (sagittarius)
 	    (sagittarius control)
 	    (sagittarius object))
@@ -92,6 +93,12 @@
 	(make <dbi-postgres-connection> :connection conn
 	      :auto-commit auto-commit))))
 
+(define (re-raise who e)
+  (raise (condition
+	  (make-dbi-sql-error (postgresql-error-code e))
+	  (make-who-condition who)
+	  e)))
+
 (define-method dbi-open? ((conn <dbi-postgres-connection>))
   (and (postgres-connection conn) #t))
 
@@ -132,14 +139,16 @@
   (set! (~ q 'prepared) #f))
 
 (define-method dbi-commit! ((conn <dbi-postgres-connection>))
-  (let1 r (postgresql-commit! (postgres-connection conn))
-    (unless (~ conn 'auto-commit) (emit-begin (postgres-connection conn)))
-    r))
+  (guard (e ((postgresql-error? e) (re-raise 'dbi-commit! e)))
+    (let1 r (postgresql-commit! (postgres-connection conn))
+      (unless (~ conn 'auto-commit) (emit-begin (postgres-connection conn)))
+      r)))
 
 (define-method dbi-rollback! ((conn <dbi-postgres-connection>))
-  (let1 r (postgresql-rollback! (postgres-connection conn))
-    (unless (~ conn 'auto-commit) (emit-begin (postgres-connection conn)))
-    r))
+  (guard (e ((postgresql-error? e) (re-raise 'dbi-rollback! e)))
+    (let1 r (postgresql-rollback! (postgres-connection conn))
+      (unless (~ conn 'auto-commit) (emit-begin (postgres-connection conn)))
+      r)))
 
 ;; we need to send parameter when it's executed otherwise doesn't work
 (define-method dbi-bind-parameter! ((query <dbi-postgres-query>)
@@ -149,22 +158,23 @@
 	  (else (set! (~ query 'parameters) (acons index value params))))))
 
 (define-method dbi-execute! ((query <dbi-postgres-query>) . args)
-  (let ((stmt (dbi-query-prepared query)))
-    (unless (null? args)
-      ;; bind
-      (do ((i 1 (+ i 1)) (params args (cdr params)))
-	  ((null? params) #t)
-	(dbi-bind-parameter! query i (car params))))
-    (apply postgresql-bind-parameters! stmt
-	   (map cdr (list-sort (lambda (a b) (< (car a) (car b)))
-			       (~ query 'parameters))))
-    ;; reset end flag
-    (set! (~ query 'end?) #f)
-    (let1 q (postgresql-execute! stmt)
-      (if (postgresql-query? q)
-	  (begin (set! (~ query 'query) q) -1)
-	  ;; modification?
-	  q))))
+  (guard (e ((postgresql-error? e) (re-raise'dbi-execute! e)))
+    (let ((stmt (dbi-query-prepared query)))
+      (unless (null? args)
+	;; bind
+	(do ((i 1 (+ i 1)) (params args (cdr params)))
+	    ((null? params) #t)
+	  (dbi-bind-parameter! query i (car params))))
+      (apply postgresql-bind-parameters! stmt
+	     (map cdr (list-sort (lambda (a b) (< (car a) (car b)))
+				 (~ query 'parameters))))
+      ;; reset end flag
+      (set! (~ query 'end?) #f)
+      (let1 q (postgresql-execute! stmt)
+	(if (postgresql-query? q)
+	    (begin (set! (~ query 'query) q) -1)
+	    ;; modification?
+	    q)))))
 
 (define-method dbi-fetch! ((query <dbi-postgres-query>))
   (if (~ query 'end?)
@@ -190,14 +200,61 @@
 
 (define (make-postgres-driver) (make <dbi-postgres-driver>))
 
-;; TODO 
+(define-class <dbi-postgres-table> (<dbi-table>)
+  ((conn :init-keyword :conn)))
+(define-class <dbi-postgres-column> (<dbi-column>)
+  ())
+
 (define-method dbi-tables ((conn <dbi-postgres-connection>)
-			   :key (schema "") (table "") (types '(table view)))
-  (error 'dbi-tables "not supported" conn))
+			   :key (schema #f) (table #f) (types '(table view)))
+  (define (construct-sql types schema table)
+    (define (err type) (error 'dbi-tables "unknown type" type))
+    (ssql->sql
+     `(select (table_schema table_name table_type)
+	      (from (~ information_schema tables))
+	      (where (and (= 1 1)
+			  ,@(if schema '((like table_schema ?)) '())
+			  ,@(if table '((like table_name ?)) '())
+			  ,@(if (not (null? types))
+				`((or ,@(map (lambda (type)
+					       `(= table_type
+						   ,(case type
+						      ((table) "BASE TABLE")
+						      ((view)  "VIEW")
+						      (else (err type)))))
+					     types)))
+			       '()))))))
+  (define (filter-params)
+    (cond ((and schema table) (list schema table))
+	  (schema (list schema))
+	  (table (list table))
+	  (else '())))
+  (let ((q (dbi-prepare conn (construct-sql types schema table))))
+    (apply dbi-execute! q (filter-params))
+    (let ((r (dbi-query-map q (lambda (r)
+				(make <dbi-postgres-table>
+				  :schema (~ r 0) :name (~ r 1)
+				  :type (if (string=? (~ r 2) "VIEW")
+					    'view
+					    'table)
+				  :conn conn)))))
+      (dbi-close q)
+      r)))
 
-;; TODO 
+(define column-sql
+  (ssql->sql
+   '(select (column_name data_type is_nullable)
+	    (from (~ information_schema columns))
+	    (where (and (= table_schema ?)
+			(= table_name ?))))))
 (define-method dbi-table-columns ((table <dbi-postgres-table>))
-  (error 'dbi-tables "not supported" table))
-
-
+  (let* ((q (dbi-execute-query-using-connection!
+	     (~ table 'conn) column-sql (~ table 'schema) (~ table 'name)))
+	 (r (dbi-query-map q (lambda (r)
+			       (make <dbi-postgres-column>
+				 :name (~ r 0) :table table
+				 :column-type (~ r 1)
+				 :nullable? (string=? (~ r 2) "YES"))))))
+      (dbi-close q)
+      r))
 )
